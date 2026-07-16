@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "landscape3d"
+version = "0.1.0"
+description = "Three-dimensional landscape metrics for labeled voxel volumes."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy",
+  "pandas",
+  "scipy",
+  "nibabel",
+]
+
+[project.optional-dependencies]
+feature-clustering = [
+  "torch",
+  "matplotlib",
+]
+
+[project.scripts]
+landscape3d = "landscape3d.cli:main"
+landscape2d = "landscape2d.cli:main"
+landscale2d = "landscale2d.cli:main"
+landscape2d-cluster-features = "landscape2d.cli_cluster:main"
+landscale2d-cluster-features = "landscale2d.cli_cluster:main"
+landscape2d-cluster-predict = "landscape2d.cli_cluster_predict:main"
+landscale2d-cluster-predict = "landscale2d.cli_cluster_predict:main"
+landscape2d-merge-patient-maps = "landscape2d.cli_merge:main"
+landscale2d-merge-patient-maps = "landscale2d.cli_merge:main"
+
+[tool.setuptools.packages.find]
+include = ["landscape3d*", "landscape2d*", "landscale2d*"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from .grid import add_grid_arguments, grid_options
 
 from .feature_clustering import infer_feature_file
 
@@ -36,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove connected patches smaller than this many cells from saved label matrices. Default: 0.",
     )
     parser.add_argument("--no-progress", action="store_true", help="Disable progress messages.")
+    add_grid_arguments(parser)
     return parser
 
 
@@ -51,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         save_latent=args.save_latent,
         min_patch_cells=args.min_patch_cells,
         progress=not args.no_progress,
+        **grid_options(args),
     )
     return 0
 

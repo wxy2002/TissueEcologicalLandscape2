@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy import ndimage
@@ -19,6 +19,9 @@ class PatchStats:
     fractal_dimension_2d: float
     related_circumscribing_circle: float
     contiguity_index: float
+    perimeter_cells: float
+    boundary_points: np.ndarray = field(compare=False, repr=False)
+    region_id: int = 0
 
 
 def connectivity_structure(connectivity: int) -> np.ndarray:
@@ -51,12 +54,19 @@ def summarize_patches(
     labels: np.ndarray,
     patch_count: int,
     spacing: tuple[float, float],
+    region_id: int = 0,
+    offset: tuple[int, int] = (0, 0),
 ) -> list[PatchStats]:
     cell_area = float(np.prod(spacing))
     stats: list[PatchStats] = []
-    for patch_label in range(1, patch_count + 1):
-        mask = labels == patch_label
-        coords = np.argwhere(mask)
+    objects = ndimage.find_objects(labels, max_label=patch_count)
+    for patch_label, bounds in enumerate(objects, 1):
+        if bounds is None:
+            continue
+        mask = labels[bounds] == patch_label
+        local_coords = np.argwhere(mask)
+        start = np.asarray([part.start for part in bounds]) + np.asarray(offset)
+        coords = local_coords + start
         cell_count = int(coords.shape[0])
         area = cell_count * cell_area
         perimeter = patch_perimeter(mask, spacing)
@@ -79,6 +89,9 @@ def summarize_patches(
                     physical_coords, area, spacing
                 ),
                 contiguity_index=_contiguity_index(mask),
+                perimeter_cells=patch_perimeter(mask, (1.0, 1.0)),
+                boundary_points=(np.argwhere(mask & ~ndimage.binary_erosion(mask)) + start) * np.asarray((spacing[1], spacing[0])),
+                region_id=region_id,
             )
         )
     return stats

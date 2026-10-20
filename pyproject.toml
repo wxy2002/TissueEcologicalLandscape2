@@ -19,6 +19,7 @@ dependencies = [
 feature-clustering = [
   "torch",
   "matplotlib",
+  "h5py",
 ]
 
 [project.scripts]
@@ -33,4 +34,4 @@ landscape2d-merge-patient-maps = "landscape2d.cli_merge:main"
 landscale2d-merge-patient-maps = "landscale2d.cli_merge:main"
 
 [tool.setuptools.packages.find]
-include = ["landscape3d*", "landscape2d*", "landscale2d*"]
+include = ["landscape3d*", "landscape2d*", "landscale2d*", "landscape_common*"]

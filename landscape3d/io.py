@@ -13,6 +13,8 @@ def validate_volume(volume: np.ndarray) -> np.ndarray:
     array = np.asarray(volume)
     if array.ndim != 3:
         raise ValueError(f"volume must be 3D, got shape {array.shape!r}")
+    if 0 in array.shape:
+        raise ValueError("volume dimensions must be non-empty")
     if np.issubdtype(array.dtype, np.floating):
         if not np.all(np.isfinite(array)):
             raise ValueError("volume labels must be finite")
@@ -34,7 +36,12 @@ def parse_classes(classes: str | Iterable[int] | None) -> list[int] | None:
             return None
         values = [int(item.strip()) for item in classes.split(",")]
     else:
-        values = [int(item) for item in classes]
+        values = []
+        for item in classes:
+            value = int(item)
+            if item != value:
+                raise ValueError("classes must be integer labels")
+            values.append(value)
     if any(value <= 0 for value in values):
         raise ValueError("classes must be positive integers; 0 is background")
     return sorted(dict.fromkeys(values))
@@ -47,8 +54,8 @@ def parse_spacing(spacing: str | Iterable[float]) -> tuple[float, float, float]:
         values = [float(item) for item in spacing]
     if len(values) != 3:
         raise ValueError("spacing must have exactly three values: sx,sy,sz")
-    if any(value <= 0 for value in values):
-        raise ValueError("spacing values must be positive")
+    if any(not np.isfinite(value) or value <= 0 for value in values):
+        raise ValueError("spacing values must be finite and positive")
     return (values[0], values[1], values[2])
 
 
@@ -86,7 +93,7 @@ def iter_volume_files(input_dir: str | Path) -> list[Path]:
         raise FileNotFoundError(input_path)
     if not input_path.is_dir():
         raise NotADirectoryError(input_path)
-    return sorted(path for path in input_path.iterdir() if is_volume_file(path))
+    return sorted(path for path in input_path.iterdir() if path.is_file() and is_volume_file(path))
 
 
 def is_volume_file(path: str | Path) -> bool:

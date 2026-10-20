@@ -21,6 +21,8 @@ def surface_and_contact_areas(
             "total_surface_area": 0.0,
             "like_internal_face_area": 0.0,
             "total_internal_face_area": 0.0,
+            "like_adjacency_count": 0.0,
+            "total_adjacency_count": float(6 * np.count_nonzero(volume == cls)),
         }
         for cls in classes
     }
@@ -44,8 +46,9 @@ def surface_and_contact_areas(
             per_class[cls]["like_internal_face_area"] += (
                 float(np.count_nonzero(same & cls_left)) * face_area
             )
+            per_class[cls]["like_adjacency_count"] += 2 * float(np.count_nonzero(same & cls_left))
             per_class[cls]["total_internal_face_area"] += (
-                float(np.count_nonzero(non_background_pair & (cls_left | cls_right)))
+                float(2 * np.count_nonzero(same & cls_left) + np.count_nonzero(diff & (cls_left | cls_right)))
                 * face_area
             )
             other_count = int(np.count_nonzero(diff & (cls_left | cls_right)))
@@ -53,11 +56,10 @@ def surface_and_contact_areas(
             per_class[cls]["unlike_boundary_area"] += other_count * face_area
 
         if np.any(diff):
-            left_diff = left[diff]
-            right_diff = right[diff]
-            for a, b in zip(left_diff.tolist(), right_diff.tolist()):
+            pairs, counts = np.unique(np.sort(np.column_stack((left[diff], right[diff])), axis=1), axis=0, return_counts=True)
+            for (a, b), count in zip(pairs, counts):
                 if a in class_set and b in class_set:
-                    pairwise[tuple(sorted((int(a), int(b))))] += face_area
+                    pairwise[(int(a), int(b))] += int(count) * face_area
 
     for cls in classes:
         class_mask = volume == cls

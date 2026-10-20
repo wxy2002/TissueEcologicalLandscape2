@@ -4,11 +4,14 @@ import math
 from itertools import combinations
 
 import numpy as np
-from scipy.spatial.distance import cdist
+from numbers import Integral
+
+from landscape_common.aggregation import contagion, interspersion, clumpiness
+from landscape_common.spatial import nearest_boundary_distances
 
 from .adjacency import surface_and_contact_areas
 from .io import parse_classes, parse_spacing, validate_volume
-from .patches import PatchStats, label_patches, summarize_patches
+from .patches import PatchStats, connectivity_structure, label_patches, summarize_patches
 
 
 CLASS_METRICS = [
@@ -40,9 +43,6 @@ CLASS_METRICS = [
     "sphericity_mean",
     "sphericity_sd",
     "sphericity_cv",
-    "fractal_dimension_3d_mean",
-    "fractal_dimension_3d_sd",
-    "fractal_dimension_3d_cv",
     "radius_gyration_mean",
     "radius_gyration_sd",
     "radius_gyration_cv",
@@ -50,7 +50,7 @@ CLASS_METRICS = [
     "clumpiness",
     "splitting_index",
     "effective_mesh_size",
-    "cohesion_3d",
+    "patch_volume_concentration",
     "nearest_neighbor_mean",
     "nearest_neighbor_sd",
     "nearest_neighbor_cv",
@@ -70,15 +70,17 @@ def compute_metrics(
 ) -> dict[str, float]:
     labels = validate_volume(volume)
     spacing_tuple = parse_spacing(spacing)
-    if min_patch_voxels < 0:
+    connectivity_structure(connectivity)
+    if not isinstance(min_patch_voxels, Integral) or min_patch_voxels < 0:
         raise ValueError("min_patch_voxels must be non-negative")
-    if min_patch_volume < 0:
+    if not np.isfinite(min_patch_volume) or min_patch_volume < 0:
         raise ValueError("min_patch_volume must be non-negative")
 
     class_values = parse_classes(classes)
     if class_values is None:
-        max_class = int(labels.max(initial=0))
-        class_values = list(range(1, max_class + 1))
+        class_values = sorted(int(value) for value in np.unique(labels) if value > 0)
+    if not set(int(value) for value in np.unique(labels) if value > 0).issubset(class_values):
+        raise ValueError("classes must include every observed non-background label")
     labels = _filter_small_patches(
         labels,
         class_values,
@@ -117,13 +119,13 @@ def compute_metrics(
         class_volumes[cls] = class_volume
         surface_area = adjacency[cls]["total_surface_area"]
         other_area = adjacency[cls]["boundary_to_other_classes_area"]
-        like_area = adjacency[cls]["like_internal_face_area"]
-        internal_area = adjacency[cls]["total_internal_face_area"]
+        like_count = adjacency[cls]["like_adjacency_count"]
+        adjacency_count = adjacency[cls]["total_adjacency_count"]
 
         patch_volumes = [patch.volume for patch in patch_stats]
         patch_surfaces = [patch.surface_area for patch in patch_stats]
         sv_ratios = [_safe_divide(patch.surface_area, patch.volume) for patch in patch_stats]
-        nearest = _nearest_neighbor_distances(patch_stats)
+        nearest = nearest_boundary_distances(patch_stats)
 
         result.update(
             {
@@ -149,16 +151,16 @@ def compute_metrics(
                 ],
                 f"class_{cls}_boundary_to_other_classes_area": other_area,
                 f"class_{cls}_like_adjacency_percent": _safe_percent(
-                    like_area, internal_area
-                ),
-                f"class_{cls}_clumpiness": _clumpiness(like_area, internal_area, class_volume, total_non_background_volume),
+                    like_count, adjacency_count
+                ) if voxel_count > 1 else float("nan"),
+                f"class_{cls}_clumpiness": clumpiness(like_count, adjacency_count, class_volume / landscape_extent_volume),
                 f"class_{cls}_splitting_index": _splitting_index(
                     patch_volumes, total_non_background_volume
                 ),
                 f"class_{cls}_effective_mesh_size": _effective_mesh_size(
                     patch_volumes, total_non_background_volume
                 ),
-                f"class_{cls}_cohesion_3d": _cohesion_3d(patch_volumes),
+                f"class_{cls}_patch_volume_concentration": _patch_volume_concentration(patch_volumes),
                 f"class_{cls}_unlike_boundary_area": adjacency[cls]["unlike_boundary_area"],
                 f"class_{cls}_unlike_boundary_percent": _safe_percent(
                     other_area, surface_area
@@ -170,7 +172,6 @@ def compute_metrics(
         _add_summary(result, f"class_{cls}_surface_volume_ratio", sv_ratios, include_range=False)
         _add_summary(result, f"class_{cls}_shape_index", [p.shape_index for p in patch_stats], include_range=False)
         _add_summary(result, f"class_{cls}_sphericity", [p.sphericity for p in patch_stats], include_range=False)
-        _add_summary(result, f"class_{cls}_fractal_dimension_3d", [p.fractal_dimension_3d for p in patch_stats], include_range=False)
         _add_summary(result, f"class_{cls}_radius_gyration", [p.radius_gyration for p in patch_stats], include_range=False)
         _add_summary(result, f"class_{cls}_nearest_neighbor", nearest, include_range=False)
 
@@ -208,12 +209,10 @@ def _filter_small_patches(
     filtered = labels.copy()
     for cls in class_values:
         patch_labels, patch_count = label_patches(labels == cls, connectivity)
-        for patch_label in range(1, patch_count + 1):
-            patch_mask = patch_labels == patch_label
-            patch_voxels = int(np.count_nonzero(patch_mask))
-            patch_volume = patch_voxels * voxel_volume
-            if patch_voxels < min_patch_voxels or patch_volume < min_patch_volume:
-                filtered[patch_mask] = 0
+        sizes = np.bincount(patch_labels.ravel(), minlength=patch_count + 1)
+        remove = (sizes < min_patch_voxels) | (sizes * voxel_volume < min_patch_volume)
+        remove[0] = False
+        filtered[remove[patch_labels]] = 0
     return filtered
 
 
@@ -235,12 +234,11 @@ def _landscape_metrics(
         for volume in present_volumes
         if total_non_background_volume > 0
     ]
-    total_surface_area = sum(values["total_surface_area"] for values in adjacency.values())
-    total_unlike = sum(pairwise.values()) * 2.0
-    total_internal = sum(
-        values["total_internal_face_area"] for values in adjacency.values()
-    )
-    same_internal = sum(values["like_internal_face_area"] for values in adjacency.values())
+    sum_class_surfaces = sum(values["total_surface_area"] for values in adjacency.values())
+    total_unlike = sum(pairwise.values())
+    total_surface_area = sum_class_surfaces - total_unlike
+    total_adjacencies = sum(values["total_adjacency_count"] for values in adjacency.values())
+    like_adjacencies = sum(values["like_adjacency_count"] for values in adjacency.values())
     diversity_count = len(proportions)
     shannon = -sum(p * math.log(p) for p in proportions if p > 0)
     simpson = 1.0 - sum(p * p for p in proportions)
@@ -259,6 +257,7 @@ def _landscape_metrics(
         if diversity_count > 1
         else float("nan"),
         "landscape_total_surface_area": total_surface_area,
+        "landscape_sum_class_surface_area": sum_class_surfaces,
         "landscape_surface_density": _safe_divide(
             total_surface_area, total_non_background_volume
         ),
@@ -273,9 +272,7 @@ def _landscape_metrics(
         "landscape_shape_index_mean": _mean([p.shape_index for p in all_patches]),
         "landscape_sphericity_mean": _mean([p.sphericity for p in all_patches]),
         "landscape_contagion": _contagion(labels, class_values),
-        "landscape_interspersion_juxtaposition": _safe_percent(
-            total_unlike, total_internal
-        ),
+        "landscape_interspersion_juxtaposition": interspersion(pairwise, diversity_count),
         "landscape_effective_mesh_size": _effective_mesh_size(
             patch_volumes, total_non_background_volume
         ),
@@ -284,7 +281,7 @@ def _landscape_metrics(
         ),
         "landscape_landscape_division": 1.0
         - _safe_divide(sum(v * v for v in patch_volumes), total_non_background_volume**2),
-        "landscape_aggregation_index": _safe_percent(same_internal, total_internal),
+        "landscape_like_face_adjacency_percent": _safe_percent(like_adjacencies, total_adjacencies),
         "landscape_total_unlike_boundary_area": total_unlike,
         "landscape_unlike_boundary_percent": _safe_percent(total_unlike, total_surface_area),
         "landscape_extent_volume": landscape_extent_volume,
@@ -316,26 +313,7 @@ def _add_summary(
         result[f"{prefix}_range"] = (max(clean) - min(clean)) if clean else float("nan")
 
 
-def _nearest_neighbor_distances(patches: list[PatchStats]) -> list[float]:
-    if len(patches) < 2:
-        return []
-    centroids = np.asarray([patch.centroid for patch in patches], dtype=float)
-    distances = cdist(centroids, centroids)
-    np.fill_diagonal(distances, np.inf)
-    return np.min(distances, axis=1).tolist()
-
-
-def _clumpiness(like_area: float, internal_area: float, class_volume: float, total_volume: float) -> float:
-    gii = _safe_divide(like_area, internal_area)
-    pi = _safe_divide(class_volume, total_volume)
-    if math.isnan(gii) or math.isnan(pi):
-        return float("nan")
-    if gii < pi:
-        return (gii - pi) / pi if pi > 0 else float("nan")
-    return (gii - pi) / (1.0 - pi) if pi < 1 else 1.0
-
-
-def _cohesion_3d(patch_volumes: list[float]) -> float:
+def _patch_volume_concentration(patch_volumes: list[float]) -> float:
     if not patch_volumes:
         return float("nan")
     total = sum(patch_volumes)
@@ -352,29 +330,8 @@ def _splitting_index(patch_volumes: list[float], total_volume: float) -> float:
 
 
 def _contagion(labels: np.ndarray, class_values: list[int]) -> float:
-    class_to_index = {cls: index for index, cls in enumerate(class_values)}
-    matrix = np.zeros((len(class_values), len(class_values)), dtype=float)
-    for axis in range(3):
-        left_slices = [slice(None)] * 3
-        right_slices = [slice(None)] * 3
-        left_slices[axis] = slice(0, -1)
-        right_slices[axis] = slice(1, None)
-        left = labels[tuple(left_slices)]
-        right = labels[tuple(right_slices)]
-        valid = (left > 0) & (right > 0)
-        for a, b in zip(left[valid].tolist(), right[valid].tolist()):
-            ia = class_to_index.get(int(a))
-            ib = class_to_index.get(int(b))
-            if ia is not None and ib is not None:
-                matrix[ia, ib] += 1
-                matrix[ib, ia] += 1
-    total = matrix.sum()
-    if total <= 0 or len(class_values) <= 1:
-        return float("nan")
-    probabilities = matrix[matrix > 0] / total
-    entropy = -sum(float(p) * math.log(float(p)) for p in probabilities)
-    maximum = 2.0 * math.log(len(class_values))
-    return (1.0 - entropy / maximum) * 100.0
+    """Six-face extension of the documented 2D adjacency entropy formula."""
+    return contagion(labels)
 
 
 def _mean(values: list[float]) -> float:

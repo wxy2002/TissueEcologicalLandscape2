@@ -21,6 +21,8 @@ def edge_and_contact_lengths(
             "total_edge_length": 0.0,
             "like_internal_edge_length": 0.0,
             "total_internal_edge_length": 0.0,
+            "like_adjacency_count": 0.0,
+            "total_adjacency_count": float(4 * np.count_nonzero(matrix == cls)),
         }
         for cls in classes
     }
@@ -44,8 +46,9 @@ def edge_and_contact_lengths(
             per_class[cls]["like_internal_edge_length"] += (
                 float(np.count_nonzero(same & cls_left)) * edge_length
             )
+            per_class[cls]["like_adjacency_count"] += 2 * float(np.count_nonzero(same & cls_left))
             per_class[cls]["total_internal_edge_length"] += (
-                float(np.count_nonzero(non_background_pair & (cls_left | cls_right)))
+                float(2 * np.count_nonzero(same & cls_left) + np.count_nonzero(diff & (cls_left | cls_right)))
                 * edge_length
             )
             other_count = int(np.count_nonzero(diff & (cls_left | cls_right)))
@@ -53,9 +56,10 @@ def edge_and_contact_lengths(
             per_class[cls]["unlike_boundary_length"] += other_count * edge_length
 
         if np.any(diff):
-            for a, b in zip(left[diff].tolist(), right[diff].tolist()):
+            pairs, counts = np.unique(np.sort(np.column_stack((left[diff], right[diff])), axis=1), axis=0, return_counts=True)
+            for (a, b), count in zip(pairs, counts):
                 if a in class_set and b in class_set:
-                    pairwise[tuple(sorted((int(a), int(b))))] += edge_length
+                    pairwise[(int(a), int(b))] += int(count) * edge_length
 
     for cls in classes:
         class_mask = matrix == cls

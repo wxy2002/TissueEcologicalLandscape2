@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy import ndimage
@@ -16,7 +16,7 @@ class PatchStats:
     radius_gyration: float
     shape_index: float
     sphericity: float
-    fractal_dimension_3d: float
+    boundary_points: np.ndarray = field(compare=False, repr=False)
 
 
 def connectivity_structure(connectivity: int) -> np.ndarray:
@@ -54,9 +54,13 @@ def summarize_patches(
 ) -> list[PatchStats]:
     voxel_volume = float(np.prod(spacing))
     stats: list[PatchStats] = []
-    for patch_label in range(1, patch_count + 1):
-        mask = labels == patch_label
-        coords = np.argwhere(mask)
+    objects = ndimage.find_objects(labels, max_label=patch_count)
+    for patch_label, bounds in enumerate(objects, 1):
+        if bounds is None:
+            continue
+        mask = labels[bounds] == patch_label
+        start = np.asarray([part.start for part in bounds])
+        coords = np.argwhere(mask) + start
         voxel_count = int(coords.shape[0])
         volume = voxel_count * voxel_volume
         surface_area = patch_surface_area(mask, spacing)
@@ -66,7 +70,6 @@ def summarize_patches(
         radius_gyration = float(np.sqrt(np.mean(squared_distances)))
         shape_index = _shape_index_3d(surface_area, volume)
         sphericity = _sphericity(surface_area, volume)
-        fractal_dimension = _fractal_dimension_3d(surface_area, volume)
         stats.append(
             PatchStats(
                 label=patch_label,
@@ -77,7 +80,7 @@ def summarize_patches(
                 radius_gyration=radius_gyration,
                 shape_index=shape_index,
                 sphericity=sphericity,
-                fractal_dimension_3d=fractal_dimension,
+                boundary_points=(np.argwhere(mask & ~ndimage.binary_erosion(mask)) + start) * np.asarray(spacing),
             )
         )
     return stats
@@ -94,9 +97,3 @@ def _sphericity(surface_area: float, volume: float) -> float:
     if surface_area <= 0 or volume <= 0:
         return float("nan")
     return float((np.pi ** (1.0 / 3.0)) * ((6.0 * volume) ** (2.0 / 3.0)) / surface_area)
-
-
-def _fractal_dimension_3d(surface_area: float, volume: float) -> float:
-    if surface_area <= 1 or volume <= 1:
-        return float("nan")
-    return float(2.0 * np.log(surface_area) / (3.0 * np.log(volume)))

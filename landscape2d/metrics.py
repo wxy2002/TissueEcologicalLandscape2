@@ -4,11 +4,15 @@ import math
 from itertools import combinations
 
 import numpy as np
-from scipy.spatial.distance import cdist
+from numbers import Integral
+from collections import defaultdict
+
+from landscape_common.aggregation import aggregation_index, clumpiness, contagion, interspersion, max_like_edges_2d
+from landscape_common.spatial import spatial_statistics
 
 from .adjacency import edge_and_contact_lengths
 from .filters import filter_small_patches
-from .io import parse_classes, parse_spacing, validate_matrix
+from .io import iter_regions, parse_classes, parse_spacing, validate_matrix, validate_regions
 from .patches import PatchStats, label_patches, summarize_patches
 
 
@@ -113,56 +117,86 @@ def compute_metrics(
     max_classes: int | None = None,
     min_patch_cells: int = 0,
     missing_value: float = np.nan,
+    region_ids: np.ndarray | None = None,
+    similarity_weights: dict[tuple[int, int], float] | None = None,
 ) -> dict[str, float]:
     labels = validate_matrix(matrix)
     spacing_tuple = parse_spacing(spacing)
-    labels = filter_small_patches(labels, min_patch_cells, connectivity)
+    if math.isnan(search_radius) or search_radius < 0:
+        raise ValueError("search_radius must be non-negative (positive infinity is allowed)")
+    if max_classes is not None and (not isinstance(max_classes, Integral) or max_classes <= 0):
+        raise ValueError("max_classes must be a positive integer")
+    _validate_weights(similarity_weights, "similarity_weights")
+    _validate_weights(contrast_weights, "contrast_weights")
+    if region_ids is not None:
+        region_ids = validate_regions(labels, region_ids)
+    labels = filter_small_patches(labels, min_patch_cells, connectivity, region_ids)
     class_values = parse_classes(classes)
     if class_values is None:
-        max_class = int(labels.max(initial=0))
-        class_values = list(range(1, max_class + 1))
+        class_values = sorted(int(value) for value in np.unique(labels) if value > 0)
+    present = set(int(value) for value in np.unique(labels) if value > 0)
+    if not present.issubset(class_values):
+        raise ValueError("classes must include every observed non-background label")
+    if max_classes is not None and max_classes < len(present):
+        raise ValueError("max_classes cannot be smaller than the observed class count")
 
     non_background_cells = int(np.count_nonzero(labels > 0))
     cell_area = float(np.prod(spacing_tuple))
     total_non_background_area = non_background_cells * cell_area
-    landscape_extent_area = labels.size * cell_area
+    landscape_extent_area = (labels.size if region_ids is None else np.count_nonzero(region_ids)) * cell_area
 
-    adjacency, pairwise = edge_and_contact_lengths(labels, class_values, spacing_tuple)
-
+    # Complete every class and every independent slide before any cross-class
+    # calculation. Region borders are treated as separate landscape boundaries.
+    class_patch_stats: dict[int, list[PatchStats]] = {cls: [] for cls in class_values}
+    adjacency = None
+    pairwise: dict[tuple[int, int], float] = defaultdict(float)
+    class_max_like = defaultdict(int)
+    for region_id, local, bounds in iter_regions(labels, region_ids):
+        local_adjacency, local_pairs = edge_and_contact_lengths(local, class_values, spacing_tuple)
+        if adjacency is None:
+            adjacency = local_adjacency
+        else:
+            for cls, values in local_adjacency.items():
+                for key, value in values.items():
+                    adjacency[cls][key] += value
+        for pair, length in local_pairs.items():
+            pairwise[pair] += length
+        for cls in class_values:
+            patch_labels, count = label_patches(local == cls, connectivity)
+            patches = summarize_patches(patch_labels, count, spacing_tuple, region_id,
+                                        (bounds[0].start, bounds[1].start))
+            class_patch_stats[cls].extend(patches)
+            class_max_like[cls] += max_like_edges_2d(sum(patch.cell_count for patch in patches))
+    if adjacency is None:
+        adjacency, _ = edge_and_contact_lengths(labels, class_values, spacing_tuple)
+    class_areas = {cls: sum(patch.area for patch in patches) for cls, patches in class_patch_stats.items()}
+    proximity_by_patch, nearest_by_patch, similarity_by_patch, connected_counts, possible_pairs = spatial_statistics(
+        class_patch_stats, search_radius, similarity_weights
+    )
+    spatial = (proximity_by_patch, nearest_by_patch, similarity_by_patch, connected_counts, possible_pairs)
     result: dict[str, float] = {}
-    class_patch_stats: dict[int, list[PatchStats]] = {}
-    class_areas: dict[int, float] = {}
-
     for cls in class_values:
-        mask = labels == cls
-        cell_count = int(np.count_nonzero(mask))
+        patch_stats = class_patch_stats[cls]
+        cell_count = sum(patch.cell_count for patch in patch_stats)
         if cell_count == 0:
             for metric in CLASS_METRICS:
                 result[f"class_{cls}_{metric}"] = missing_value
-            class_patch_stats[cls] = []
-            class_areas[cls] = 0.0
             continue
-
-        patch_labels, patch_count = label_patches(mask, connectivity)
-        patch_stats = summarize_patches(patch_labels, patch_count, spacing_tuple)
-        class_patch_stats[cls] = patch_stats
-        class_area = cell_count * cell_area
-        class_areas[cls] = class_area
+        patch_count = len(patch_stats)
+        class_area = class_areas[cls]
         edge_length = adjacency[cls]["total_edge_length"]
         other_length = adjacency[cls]["boundary_to_other_classes_length"]
-        like_length = adjacency[cls]["like_internal_edge_length"]
-        internal_length = adjacency[cls]["total_internal_edge_length"]
+        like_count = adjacency[cls]["like_adjacency_count"]
+        adjacency_count = adjacency[cls]["total_adjacency_count"]
 
         patch_areas = [patch.area for patch in patch_stats]
         patch_perimeters = [patch.perimeter for patch in patch_stats]
         perimeter_area_ratios = [
             _safe_divide(patch.perimeter, patch.area) for patch in patch_stats
         ]
-        proximity = _proximity_indices(patch_stats, patch_stats, search_radius)
-        similarity = _similarity_indices(
-            patch_stats, class_patch_stats, class_areas, search_radius
-        )
-        nearest = _nearest_neighbor_distances(patch_stats)
+        proximity = [proximity_by_patch[id(patch)] for patch in patch_stats]
+        similarity = [similarity_by_patch[id(patch)] for patch in patch_stats]
+        nearest = [nearest_by_patch[id(patch)] for patch in patch_stats]
         contrast_edge = _class_contrast_edge(cls, pairwise, contrast_weights)
 
         result.update(
@@ -189,13 +223,10 @@ def compute_metrics(
                 ],
                 f"class_{cls}_boundary_to_other_classes_length": other_length,
                 f"class_{cls}_like_adjacency_percent": _safe_percent(
-                    like_length, internal_length
-                ),
-                f"class_{cls}_clumpiness": _clumpiness(
-                    like_length,
-                    internal_length,
-                    class_area,
-                    total_non_background_area,
+                    like_count, adjacency_count
+                ) if cell_count > 1 else float("nan"),
+                f"class_{cls}_clumpiness": clumpiness(
+                    like_count, adjacency_count, _safe_divide(class_area, landscape_extent_area)
                 ),
                 f"class_{cls}_splitting_index": _splitting_index(
                     patch_areas, total_non_background_area
@@ -203,7 +234,7 @@ def compute_metrics(
                 f"class_{cls}_effective_mesh_size": _effective_mesh_size(
                     patch_areas, total_non_background_area
                 ),
-                f"class_{cls}_cohesion_2d": _cohesion_2d(patch_areas),
+                f"class_{cls}_cohesion_2d": _cohesion_2d(patch_stats, non_background_cells),
                 f"class_{cls}_landscape_shape_index": _landscape_shape_index(
                     edge_length, class_area
                 ),
@@ -213,9 +244,7 @@ def compute_metrics(
                 f"class_{cls}_perimeter_area_fractal_dimension": _perimeter_area_fractal_dimension(
                     patch_areas, patch_perimeters
                 ),
-                f"class_{cls}_connectance_index": _connectance_index(
-                    patch_stats, patch_stats, search_radius
-                ),
+                f"class_{cls}_connectance_index": _connectance(connected_counts.get(cls, 0), possible_pairs.get(cls, 0)),
                 f"class_{cls}_unlike_boundary_length": adjacency[cls][
                     "unlike_boundary_length"
                 ],
@@ -324,6 +353,9 @@ def compute_metrics(
             search_radius=search_radius,
             contrast_weights=contrast_weights,
             max_classes=max_classes,
+            spatial=spatial,
+            region_ids=region_ids,
+            class_max_like=class_max_like,
         )
     )
     return dict(sorted(result.items()))
@@ -342,6 +374,9 @@ def _landscape_metrics(
     search_radius: float,
     contrast_weights: dict[tuple[int, int], float] | None,
     max_classes: int | None,
+    spatial: tuple,
+    region_ids: np.ndarray | None,
+    class_max_like: dict[int, int],
 ) -> dict[str, float]:
     all_patches = [patch for patches in class_patch_stats.values() for patch in patches]
     patch_areas = [patch.area for patch in all_patches]
@@ -351,12 +386,11 @@ def _landscape_metrics(
         for area in present_areas
         if total_non_background_area > 0
     ]
-    total_edge_length = sum(values["total_edge_length"] for values in adjacency.values())
-    total_unlike = sum(pairwise.values()) * 2.0
-    total_internal = sum(values["total_internal_edge_length"] for values in adjacency.values())
-    same_internal = sum(values["like_internal_edge_length"] for values in adjacency.values())
+    sum_class_edges = sum(values["total_edge_length"] for values in adjacency.values())
+    total_unlike = sum(pairwise.values())
+    total_edge_length = sum_class_edges - total_unlike
     total_cell_count = int(round(_safe_divide(total_non_background_area, float(np.prod(spacing)))))
-    weighted_contrast_edge = _weighted_contrast_edge(pairwise, contrast_weights) * 2.0
+    weighted_contrast_edge = _weighted_contrast_edge(pairwise, contrast_weights)
     diversity_count = len(proportions)
     shannon = -sum(p * math.log(p) for p in proportions if p > 0)
     simpson = 1.0 - sum(p * p for p in proportions)
@@ -368,10 +402,11 @@ def _landscape_metrics(
     patch_circle = [patch.related_circumscribing_circle for patch in all_patches]
     patch_contiguity = [patch.contiguity_index for patch in all_patches]
     patch_gyration = [patch.radius_gyration for patch in all_patches]
-    all_proximity = _proximity_indices(all_patches, all_patches, search_radius)
-    all_similarity = _similarity_indices(
-        all_patches, class_patch_stats, class_areas, search_radius
-    )
+    proximity, nearest, similarity, connected, possible = spatial
+    all_proximity = [proximity[id(patch)] for patch in all_patches]
+    all_similarity = [similarity[id(patch)] for patch in all_patches]
+    class_cells = {cls: sum(patch.cell_count for patch in patches) for cls, patches in class_patch_stats.items()}
+    single_likes = {cls: values["like_adjacency_count"] / 2 for cls, values in adjacency.items()}
 
     result = {
         "landscape_total_non_background_area": total_non_background_area,
@@ -400,6 +435,7 @@ def _landscape_metrics(
         if diversity_count > 1
         else float("nan"),
         "landscape_total_edge_length": total_edge_length,
+        "landscape_sum_class_edge_length": sum_class_edges,
         "landscape_edge_density": _safe_divide(
             total_edge_length, total_non_background_area
         ),
@@ -422,10 +458,8 @@ def _landscape_metrics(
         ),
         "landscape_shape_index_2d_mean": _mean(patch_shapes),
         "landscape_compactness_mean": _mean(patch_compactness),
-        "landscape_contagion": _contagion(labels, class_values),
-        "landscape_interspersion_juxtaposition": _safe_percent(
-            total_unlike, total_internal
-        ),
+        "landscape_contagion": contagion(labels, region_ids),
+        "landscape_interspersion_juxtaposition": interspersion(pairwise, diversity_count),
         "landscape_effective_mesh_size": _effective_mesh_size(
             patch_areas, total_non_background_area
         ),
@@ -434,10 +468,8 @@ def _landscape_metrics(
         ),
         "landscape_landscape_division": 1.0
         - _safe_divide(sum(area * area for area in patch_areas), total_non_background_area**2),
-        "landscape_aggregation_index": _safe_percent(same_internal, total_internal),
-        "landscape_connectance_index": _connectance_index(
-            all_patches, all_patches, search_radius
-        ),
+        "landscape_aggregation_index": aggregation_index(class_cells, single_likes, class_max_like),
+        "landscape_connectance_index": _connectance(sum(connected.values()), sum(possible.values())),
         "landscape_total_unlike_boundary_length": total_unlike,
         "landscape_unlike_boundary_percent": _safe_percent(
             total_unlike, total_edge_length
@@ -495,115 +527,30 @@ def _add_summary(
         result[f"{prefix}_range"] = (max(clean) - min(clean)) if clean else float("nan")
 
 
-def _nearest_neighbor_distances(patches: list[PatchStats]) -> list[float]:
-    if len(patches) < 2:
-        return []
-    centroids = np.asarray([patch.centroid for patch in patches], dtype=float)
-    distances = cdist(centroids, centroids)
-    np.fill_diagonal(distances, np.inf)
-    return np.min(distances, axis=1).tolist()
+def _connectance(connected: int, possible: int) -> float:
+    return 100.0 * connected / possible if possible else 0.0
 
 
-def _proximity_indices(
-    target_patches: list[PatchStats],
-    candidate_patches: list[PatchStats],
-    search_radius: float,
-) -> list[float]:
-    if len(candidate_patches) < 2:
-        return [float("nan") for _ in target_patches]
-    values = []
-    for patch in target_patches:
-        total = 0.0
-        found = False
-        for other in candidate_patches:
-            if other is patch:
-                continue
-            distance = _centroid_distance(patch, other)
-            if distance <= 0 or distance > search_radius:
-                continue
-            total += other.area / (distance * distance)
-            found = True
-        values.append(total if found else 0.0)
-    return values
-
-
-def _similarity_indices(
-    target_patches: list[PatchStats],
-    class_patch_stats: dict[int, list[PatchStats]],
-    class_areas: dict[int, float],
-    search_radius: float,
-) -> list[float]:
-    all_candidates = [
-        (cls, patch)
-        for cls, patches in class_patch_stats.items()
-        for patch in patches
-    ]
-    if len(all_candidates) < 2:
-        return [float("nan") for _ in target_patches]
-    patch_class = {
-        id(patch): cls for cls, patches in class_patch_stats.items() for patch in patches
-    }
-    values = []
-    for patch in target_patches:
-        own_class = patch_class.get(id(patch))
-        own_area = class_areas.get(own_class, 0.0)
-        total = 0.0
-        found = False
-        for other_class, other in all_candidates:
-            if other is patch:
-                continue
-            distance = _centroid_distance(patch, other)
-            if distance <= 0 or distance > search_radius:
-                continue
-            similarity = _safe_divide(min(own_area, class_areas[other_class]), max(own_area, class_areas[other_class]))
-            if math.isnan(similarity):
-                continue
-            total += similarity * other.area / (distance * distance)
-            found = True
-        values.append(total if found else 0.0)
-    return values
-
-
-def _connectance_index(
-    target_patches: list[PatchStats],
-    candidate_patches: list[PatchStats],
-    search_radius: float,
-) -> float:
-    if len(target_patches) < 2:
+def _cohesion_2d(patches: list[PatchStats], landscape_cells: int) -> float:
+    if not patches:
         return float("nan")
-    total_pairs = len(target_patches) * (len(target_patches) - 1) / 2.0
-    connected = 0
-    for first, second in combinations(target_patches, 2):
-        if first in candidate_patches and second in candidate_patches:
-            if _centroid_distance(first, second) <= search_radius:
-                connected += 1
-    return _safe_percent(float(connected), total_pairs)
+    if landscape_cells <= 1:
+        return 0.0
+    perimeter_sum = sum(patch.perimeter_cells for patch in patches)
+    weighted_sum = sum(patch.perimeter_cells * math.sqrt(patch.cell_count) for patch in patches)
+    return 100.0 * (1.0 - perimeter_sum / weighted_sum) / (1.0 - 1.0 / math.sqrt(landscape_cells))
 
 
-def _centroid_distance(first: PatchStats, second: PatchStats) -> float:
-    return float(np.linalg.norm(np.asarray(first.centroid) - np.asarray(second.centroid)))
-
-
-def _clumpiness(
-    like_length: float,
-    internal_length: float,
-    class_area: float,
-    total_area: float,
-) -> float:
-    gii = _safe_divide(like_length, internal_length)
-    pi = _safe_divide(class_area, total_area)
-    if math.isnan(gii) or math.isnan(pi):
-        return float("nan")
-    if gii < pi:
-        return (gii - pi) / pi if pi > 0 else float("nan")
-    return (gii - pi) / (1.0 - pi) if pi < 1 else 1.0
-
-
-def _cohesion_2d(patch_areas: list[float]) -> float:
-    if not patch_areas:
-        return float("nan")
-    total = sum(patch_areas)
-    return _safe_percent(math.sqrt(sum(area * area for area in patch_areas)), total)
+def _validate_weights(weights, name: str) -> None:
+    if weights is None:
+        return
+    for pair, weight in weights.items():
+        if len(pair) != 2 or any(not isinstance(cls, Integral) or cls <= 0 for cls in pair):
+            raise ValueError(f"{name} keys must be pairs of positive class labels")
+        if not np.isfinite(weight) or not 0 <= weight <= 1:
+            raise ValueError(f"{name} values must be finite in [0, 1]")
+        if pair[::-1] in weights and weights[pair[::-1]] != weight:
+            raise ValueError(f"{name} must be symmetric")
 
 
 def _landscape_shape_index(edge_length: float, area: float) -> float:
@@ -690,29 +637,8 @@ def _splitting_index(patch_areas: list[float], total_area: float) -> float:
 
 
 def _contagion(labels: np.ndarray, class_values: list[int]) -> float:
-    class_to_index = {cls: index for index, cls in enumerate(class_values)}
-    matrix = np.zeros((len(class_values), len(class_values)), dtype=float)
-    for axis in range(2):
-        left_slices = [slice(None)] * 2
-        right_slices = [slice(None)] * 2
-        left_slices[axis] = slice(0, -1)
-        right_slices[axis] = slice(1, None)
-        left = labels[tuple(left_slices)]
-        right = labels[tuple(right_slices)]
-        valid = (left > 0) & (right > 0)
-        for a, b in zip(left[valid].tolist(), right[valid].tolist()):
-            ia = class_to_index.get(int(a))
-            ib = class_to_index.get(int(b))
-            if ia is not None and ib is not None:
-                matrix[ia, ib] += 1
-                matrix[ib, ia] += 1
-    total = matrix.sum()
-    if total <= 0 or len(class_values) <= 1:
-        return float("nan")
-    probabilities = matrix[matrix > 0] / total
-    entropy = -sum(float(p) * math.log(float(p)) for p in probabilities)
-    maximum = 2.0 * math.log(len(class_values))
-    return (1.0 - entropy / maximum) * 100.0
+    # Requested output columns do not change the classes present in the map.
+    return contagion(labels)
 
 
 def _mean(values: list[float]) -> float:

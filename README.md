@@ -1,4 +1,4 @@
-# landscape3d：三维生态景观指数包
+# TissueEcologicalLandscape2：二维与三维标签景观指标
 
 `landscape3d` 用于从三维标签矩阵中计算三维生态景观指数。输入是
 `H x W x D` 的整数矩阵：
@@ -8,6 +8,10 @@
 - 每个样本可以保存为一个 `.npy`、`.npz`、`.nii` 或 `.nii.gz` 文件。
 - 输出为宽表 CSV：每行一个样本，每列一个指标。
 
+2026-10-20 的正确性修复涉及坐标栅格化、指标公式、患者切片边界和输出字段。
+迁移说明与 15 项问题的验证记录见 [修复清单](docs/review-fixes.md)，
+公式、单位和缺失值规则见 [指标定义](docs/metric-definitions.md)。受影响的历史结果需要重新计算。
+
 ## 安装
 
 在项目目录下运行：
@@ -16,7 +20,13 @@
 pip install -e .
 ```
 
-依赖包括 `numpy`、`pandas`、`scipy`、`nibabel`。
+依赖包括 `numpy`、`pandas`、`scipy`、`nibabel`。使用 H5 特征聚类时安装完整可选依赖：
+
+```bash
+pip install -e '.[feature-clustering]'
+```
+
+该 extra 包含 `torch`、`matplotlib`、`h5py`。
 
 如果不想安装，也可以在当前目录下直接用：
 
@@ -63,6 +73,7 @@ np.savez("samples/case002.npz", volume=volume)
 - 正整数表示类别。
 - 如果 NIfTI 读出为浮点型，但所有值都是整数值，例如 `0.0`、`1.0`、`2.0`，程序会自动转成整数标签。
 - 如果存在非整数值、负值、NaN 或 Inf，会报错。
+- `load_volume()` 只返回标签，不会自动应用 NIfTI header/affine 的间距。必须按数组轴顺序显式传入 `spacing`；例如 header 对角间距为 `(2,3,5)` 时使用 `--spacing 2,3,5`。旋转、斜切或重采样需在输入前处理，不能只凭 voxel 标签比较真实体积。
 
 ## 命令行使用
 
@@ -233,7 +244,6 @@ case002,samples/case002.npy,NaN,NaN,...,0.00,...
 - `surface_volume_ratio_mean/sd/cv`
 - `shape_index_mean/sd/cv`
 - `sphericity_mean/sd/cv`
-- `fractal_dimension_3d_mean/sd/cv`
 - `radius_gyration_mean/sd/cv`
 
 聚集/连通：
@@ -242,7 +252,7 @@ case002,samples/case002.npy,NaN,NaN,...,0.00,...
 - `clumpiness`
 - `splitting_index`
 - `effective_mesh_size`
-- `cohesion_3d`
+- `patch_volume_concentration`（自定义体积集中度，公式见指标定义）
 - `nearest_neighbor_mean/sd/cv`
 
 非加权类别接触：
@@ -280,7 +290,7 @@ case002,samples/case002.npy,NaN,NaN,...,0.00,...
 - `effective_mesh_size`
 - `splitting_index`
 - `landscape_division`
-- `aggregation_index`
+- `like_face_adjacency_percent`（六面邻接扩展，不是二维标准 AI）
 
 类别接触：
 
@@ -301,11 +311,13 @@ case002,samples/case002.npy,NaN,NaN,...,0.00,...
 
 ## 快速测试
 
-当前环境如果安装了 `pytest`，可以运行：
+安装 `.[feature-clustering]` 后运行包含 CPU 模型训练/推理的回归测试：
 
 ```bash
-pytest tests
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m unittest discover -s tests -v
 ```
+
+GitHub Actions 对 Python 3.10 和 3.12 运行同一套检查。
 
 也可以直接检查 CLI：
 
@@ -357,7 +369,7 @@ python3 -m landscape2d.cli samples2d metrics2d.csv
 - `input_dir`：输入文件夹，包含 `.npy`、`.npz`、`.csv` 或 `.txt`。
 - `output_csv`：输出 CSV 文件路径。
 - `--classes`：需要统计的类别，例如 `1,2,3`。不提供时，会自动从所有样本中推断 `1..最大类别值`。
-- `--spacing`：像元尺寸，格式为 `sx,sy`，默认 `1,1`。
+- `--spacing`：网格间距 `sx,sy`，默认读取标签图元数据；缺少元数据时为 `1,1`。显式参数必须与已有元数据一致。
 - `--connectivity`：二维斑块连通性，可选 `4`、`8`，默认 `4`。
 - `--search-radius`：`PROX`、`SIMI`、`CONNECT` 的搜索距离，默认无限距离。
 - `--max-classes`：最大可能类别数，用于 `relative_patch_richness`。
@@ -411,7 +423,10 @@ PyTorch 自编码器把 `n x m` 特征矩阵压缩到较短的 latent 向量，�
 输入文件支持 `.h5`、`.hdf5`、`.npy`、`.npz`、`.csv`、`.txt`：
 
 - `.h5/.hdf5`：默认读取 `feats` 作为 `n x m` 特征矩阵；如果存在 `coords`，
-  会在输出 `.npz` 中保留坐标。
+  会在输出 `.npz` 中保留坐标。生成空间标签图还必须提供 `grid_stride`。
+  H5 根属性或 `coords` 属性可保存 `grid_stride=(sx,sy)`、`grid_origin=(x0,y0)`、
+  `coordinate_level`、`coord_downsample`、`mpp=(mpp_x,mpp_y)`；NPZ 支持同名数组。
+  这些参数也可以用同名命令行选项（连字符形式）明确传入。
 - `.npy`：直接保存一个二维特征矩阵。
 - `.npz`：优先读取 `features`，也支持 `x`、`array`，或单数组文件。
 
@@ -420,6 +435,7 @@ PyTorch 自编码器把 `n x m` 特征矩阵压缩到较短的 latent 向量，�
 ```bash
 landscape2d-cluster-features uni-0242c340 cluster_out \
   --n-clusters 6 \
+  --grid-stride 256,256 \
   --latent-dim 32 \
   --epochs 100 \
   --batch-size 512 \
@@ -431,6 +447,7 @@ landscape2d-cluster-features uni-0242c340 cluster_out \
 ```bash
 landscape2d-cluster-features uni-0242c340 cluster_out \
   --k-range 2,10 \
+  --grid-stride 256,256 \
   --latent-dim 32 \
   --epochs 100 \
   --max-train-tiles 200000 \
@@ -452,12 +469,16 @@ landscape2d-cluster-features uni-0242c340 cluster_out \
 
 - `all_clusters.npz`：全部输入文件合并后的顺序标签，包含 `tile_labels`、
   `sample_ids`、`source_files`、`sample_counts`，用于追踪每个 tile 的原始顺序。
-- `每个样本名_clusters.npz`：每个输入文件各自的二维标签矩阵，`labels` 和
-  `matrix` 都是可直接用于 `landscape2d` 指标计算的整数矩阵；背景/空洞为 `0`，
-  聚类类别为 `1..K`。H5 输入会额外保留 `coords` 和 `tile_labels`。
+- `每个样本名_clusters.npz`：始终包含全量 `tile_labels`。只有坐标和明确步长都可用时，
+  才包含二维 `labels`/`matrix`；背景/空洞为 `0`，类别为 `1..K`。完整空白行列会保留，
+  重复坐标和未对齐坐标会报错。缺少空间信息时不构造伪造的 `1×N` 邻接图。
+- `label_maps.json`：明确列出可供指标计算的空间标签图。`landscape2d cluster_out metrics.csv`
+  会使用此清单，排除 `all_clusters.npz`、聚类统计 CSV 及自己的输出。
 - `cluster_metrics.csv`：聚类相关指标，包括 `inertia`、`silhouette_score`、
   `calinski_harabasz_score`、`davies_bouldin_score`、每类数量和比例；
-  自动 K 时用 `selected=True` 标记选中的 K。
+  自动 K 时用 `selected=True` 标记选中的 K。推理的三个质量分数基于有界均匀样本计算，
+  `metric_sample_count` 给出实际样本数；`inertia` 和类别计数仍覆盖全部 tile。
+  样本不足、类别不足或每个样本各成一类时，未定义分数为 `NaN`。
 - `latent_scatter.png`：latent 特征 PCA 到二维后的聚类散点图。
 - `cluster_model.pt`：固定后的推理参数，包括标准化参数、自编码器权重、选中的 K 和 KMeans 聚类中心。
 
@@ -467,12 +488,14 @@ landscape2d-cluster-features uni-0242c340 cluster_out \
 landscape2d-cluster-predict new_h5_folder \
   cluster_out/cluster_model.pt \
   new_cluster_out \
+  --grid-stride 256,256 \
   --min-patch-cells 5 \
   --device cuda
 ```
 
 推理输出同样包括每个样本的 `*_clusters.npz`、`cluster_metrics.csv` 和
-`latent_scatter.png`。其中 `labels`/`matrix` 仍为二维整数矩阵，类别编号沿用训练模型的 `1..K`。
+`latent_scatter.png`。只有空间信息完整时 `labels`/`matrix` 才存在；类别编号沿用训练模型的 `1..K`。
+`model_id` 为固定模型文件的 SHA-256，用来校验跨切片类别含义。
 
 常用参数：
 
@@ -486,37 +509,56 @@ landscape2d-cluster-predict new_h5_folder \
 - `--save-latent`：把 latent 特征也保存进 `.npz`。
 - `--device`：默认 `cuda`；也可指定 `cuda:0`、`cpu`、`auto` 等。
 
+空间尺度约定：`coords[:,0/1]` 是 x/y，矩阵轴为 row/column。步长与坐标必须使用同一层级单位。
+默认坐标位于 level 0；其他层级需要 `--coordinate-level` 与实际的 `--coord-downsample`。
+如果给出 level-0 `--mpp`，网格物理间距为 `grid_stride × coord_downsample × mpp`，单位 µm；
+否则间距只标为 `coordinate_units`，不能用于患者多切片汇总。示例中的步长 256 必须换成实际提取步长。
+
+Python 训练结果的 `labels` 覆盖全量 tile；`sampled_latent`、`sampled_labels`、
+`sample_source_files`、`sample_row_indices` 相互逐行对齐，明确记录训练/评价抽样来源。
+旧的 `latent` 属性是已弃用的 `sampled_latent` 别名，不与全量 `labels` 对齐。
+
 ## 同患者多 WSI 标签图合并
 
-如果同一个患者有多个 WSI 切片，对应输出了多个 `*_clusters.npz`，可以按文件名前
-N 个字符分组，并把同组二维标签矩阵横向合并。合并时不同 WSI 之间插入背景空白列，
-高度不足的矩阵下方补 `0`。
+横向布局用于展示；患者级指标会根据 `region_ids` 把每张切片作为独立空间。
+不同切片的斑块不会连接，ENN、PROX、SIMI、CONNECT 不跨切片搜索，人工空白列和补零不计入景观范围。
+组成指标合计真实类别面积，斑块指标汇集底层记录后计算，不能直接平均逐切片指标。
 
-先预览分组，不写入也不删除：
+推荐提供经过核实的患者—切片 CSV：
 
-```bash
-python3 -m landscape2d.cli_merge output/ccRCC/test_map \
-  --prefix-length 12 \
-  --blank-cols 3 \
-  --dry-run
+```csv
+source_file,patient_id
+C3L-00004-21_clusters.npz,C3L-00004
+C3L-00004-26_clusters.npz,C3L-00004
 ```
 
-正式合并：
-
 ```bash
-python3 -m landscape2d.cli_merge output/ccRCC/test_map \
-  --prefix-length 12 \
-  --blank-cols 3
+landscape2d-merge-patient-maps cluster_out --patient-manifest patients.csv --dry-run
+landscape2d-merge-patient-maps cluster_out --patient-manifest patients.csv --blank-cols 3
+landscape2d cluster_out patient_metrics.csv
 ```
 
-默认行为：
+- 每张图必须声明相同的 `model_id`、物理 `spacing` 和 `spacing_unit`。聚类输出可由同一固定模型加真实 MPP 重新推理生成。
+- 清单由调用者核验患者、样本类型、取材位置和时间点；需要区分的分析组应使用不同分组 ID。
+- `--prefix-length N` 是显式选择的数据集专用替代规则，不能和 `--patient-manifest` 混用。
+  TCGA participant 条码可使用前 12 字符；CPTAC/CMB 不能直接套用同一截断长度，优先使用对应表。
+- 仅处理同组文件数大于 1 的组，单文件组保留在标签图清单中。
+- 默认保留原文件；只有显式指定 `--delete-originals` 才会在临时文件写入、校验和原子发布后删除。
+- 已有 `{患者ID}_merged.npz` 时拒绝覆盖。增量输入应使用新 `--output-suffix` 并重新提供该患者完整原图清单；不会把旧拼接图当成新切片。
+- 输出包含 `region_ids`、`slide_ids`、`slide_bounds`、源文件和源空间元数据；更新后的 `label_maps.json`
+  用合并图替换对应逐切片条目，保留原文件时也不会在批处理中重复统计。
+- 历史合并图若没有切片边界，必须从原始切片重建。
 
-- 按文件名 stem 的前 `--prefix-length` 个字符作为患者 ID。
-- 只合并同组内文件数大于 1 的样本。
-- 输出 `{患者ID}_merged.npz`，其中 `matrix` 和 `labels` 是合并后的二维整数矩阵。
-- 合并成功后删除同组原始 `.npz`，只保留合并文件。
-- 单文件组不会修改。
-- 如果想保留原文件，添加 `--keep-originals`。
+直接调用 API 读取合并图时必须保留边界：
+
+```python
+from landscape2d.io import load_label_map
+from landscape2d import compute_metrics
+
+label_map = load_label_map("cluster_out/C3L-00004_merged.npz")
+metrics = compute_metrics(label_map.matrix, spacing=label_map.spacing,
+                          region_ids=label_map.region_ids, search_radius=1000)
+```
 
 ## landscape2d 已实现指标
 
@@ -640,5 +682,13 @@ python3 -m landscape2d.cli_merge output/ccRCC/test_map \
 - `pland` 等比例指标的分母为非背景面积，而不是整个矩阵面积。
 - 不包含 core area 系列指标。
 - Contrast 指标默认把所有异类边界权重视为 `1`、同类权重视为 `0`；Python API 可通过 `contrast_weights` 传入类别差异权重。
-- `PROX`、`SIMI`、`CONNECT` 使用 `search_radius`，默认无限距离；命令行可用 `--search-radius` 指定。
+- `ENN`、`PROX`、`SIMI`、`CONNECT` 使用斑块边缘像元中心间的最短物理距离；邻居限制在同一切片内。
+- `PROX` 和 `CONNECT` 只比较同类斑块。无邻居时 PROX 为 0、ENN 为 NaN；没有可比较斑块对时 CONNECT 为 0。
+- `SIMI` 的 Python API 接受对称的 `similarity_weights={(1,2):0.5}`，范围为 `[0,1]`。默认同类为 1、异类为 0。
+- `PROX`、`SIMI`、`CONNECT` 使用 `search_radius`，默认无限距离；大规模图建议按研究设计指定有限的 `--search-radius`。
 - `relative_patch_richness` 需要 `max_classes`，未指定时输出 `NaN`；命令行可用 `--max-classes` 指定。
+
+- `landscape_total_edge_length` 使用唯一边界，异类共享边只计一次；旧的各类周长总和另存为 `landscape_sum_class_edge_length`。
+- 邻接指标按像元接触次数计算，不按物理边长加权；周长和接触长度使用物理间距。
+- `classes` 必须覆盖所有已观察到的非背景类别，额外请求的缺失类别不会改变景观指标。
+- 批处理一次只加载一个样本；自动推断类别时先按文件轻量扫描，不把所有矩阵常驻内存。

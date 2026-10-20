@@ -1,0 +1,61 @@
+{
+  "python": "3.10.0",
+  "numpy": "2.2.5",
+  "scipy": "1.15.3",
+  "repeats": 3,
+  "max_rss_mib": 153.62890625,
+  "cases": [
+    {
+      "size": 8,
+      "patches": 16,
+      "search_radius": "inf",
+      "median_seconds": 0.014362326997797936
+    },
+    {
+      "size": 16,
+      "patches": 64,
+      "search_radius": "inf",
+      "median_seconds": 0.10161385696846992
+    },
+    {
+      "size": 24,
+      "patches": 144,
+      "search_radius": "inf",
+      "median_seconds": 0.42607718997169286
+    },
+    {
+      "size": 200,
+      "patches": 10000,
+      "search_radius": 3.0,
+      "median_seconds": 6.208591650996823
+    }
+  ],
+  "date": "2026-10-20",
+  "review_base": "78a86e8351d8ef4a1a1b1cd7e940cc724ce77fe3",
+  "regression_tests": {
+    "count": 26,
+    "passed": 26,
+    "command": "python -m unittest discover -s tests -v",
+    "elapsed_seconds": 3.939
+  },
+  "wheel": {
+    "built": true,
+    "isolated_target_imports_passed": true,
+    "h5py_extra_declared": true
+  },
+  "sklearn_comparison": {
+    "cases": 3,
+    "passed": 3
+  },
+  "packages": {
+    "pandas": "2.3.3",
+    "torch": "2.9.1",
+    "h5py": "3.15.1",
+    "nibabel": "5.4.0",
+    "scikit-learn": "1.7.2"
+  },
+  "cli_entry_points": {
+    "checked": 9,
+    "passed": 9
+  }
+}

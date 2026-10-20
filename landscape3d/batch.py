@@ -5,6 +5,8 @@ import sys
 from typing import TextIO
 
 import pandas as pd
+import numpy as np
+from numbers import Integral
 
 from .io import (
     iter_volume_files,
@@ -30,36 +32,31 @@ def compute_batch(
     progress_stream: TextIO | None = None,
 ) -> pd.DataFrame:
     stream = progress_stream or sys.stderr
-    if min_patch_voxels < 0:
+    if not isinstance(min_patch_voxels, Integral) or min_patch_voxels < 0:
         raise ValueError("min_patch_voxels must be non-negative")
-    if min_patch_volume < 0:
+    if not np.isfinite(min_patch_volume) or min_patch_volume < 0:
         raise ValueError("min_patch_volume must be non-negative")
-    if min_non_background_voxels < 0:
+    if not isinstance(min_non_background_voxels, Integral) or min_non_background_voxels < 0:
         raise ValueError("min_non_background_voxels must be non-negative")
-    if min_non_background_volume < 0:
+    if not np.isfinite(min_non_background_volume) or min_non_background_volume < 0:
         raise ValueError("min_non_background_volume must be non-negative")
 
-    files = iter_volume_files(input_dir)
+    files = [path for path in iter_volume_files(input_dir) if path.resolve() != Path(output_csv).resolve()]
     if not files:
         raise ValueError(f"no .npy, .npz, .nii, or .nii.gz files found in {input_dir}")
 
     class_values = parse_classes(classes)
     spacing_tuple = parse_spacing(spacing)
-    volumes = []
-    for index, path in enumerate(files, start=1):
-        _show_progress(
-            progress,
-            stream,
-            f"Loading volumes: {index}/{len(files)} {path.name}",
-        )
-        volumes.append((path, load_volume(path)))
     if class_values is None:
-        max_class = max(int(volume.max(initial=0)) for _, volume in volumes)
-        class_values = list(range(1, max_class + 1))
+        observed: set[int] = set()
+        for path in files:
+            observed.update(int(value) for value in np.unique(load_volume(path)) if value > 0)
+        class_values = sorted(observed)
 
     rows = []
     skipped_count = 0
-    for index, (path, volume) in enumerate(volumes, start=1):
+    for index, path in enumerate(files, start=1):
+        volume = load_volume(path)
         sample_voxels = int((volume > 0).sum())
         sample_volume = sample_voxels * float(spacing_tuple[0] * spacing_tuple[1] * spacing_tuple[2])
         if (
@@ -71,7 +68,7 @@ def compute_batch(
                 progress,
                 stream,
                 (
-                    f"Skipping sample: {index}/{len(volumes)} {path.name} "
+                    f"Skipping sample: {index}/{len(files)} {path.name} "
                     f"(non_background_voxels={sample_voxels}, "
                     f"non_background_volume={sample_volume:g})"
                 ),
@@ -81,7 +78,7 @@ def compute_batch(
         _show_progress(
             progress,
             stream,
-            f"Computing metrics: {index}/{len(volumes)} {path.name}",
+            f"Computing metrics: {index}/{len(files)} {path.name}",
         )
         row = {"sample_id": sample_id_from_path(path), "source_file": str(path)}
         row.update(

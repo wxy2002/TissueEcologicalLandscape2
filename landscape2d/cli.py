@@ -19,8 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--spacing",
-        default="1,1",
-        help="Pixel spacing as sx,sy. Default: 1,1.",
+        default=None,
+        help="Grid spacing as sx,sy. Default: map metadata, otherwise 1,1.",
     )
     parser.add_argument(
         "--connectivity",

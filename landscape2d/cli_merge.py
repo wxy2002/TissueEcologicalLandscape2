@@ -11,10 +11,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Merge multiple WSI label-map .npz files from the same patient horizontally.",
     )
     parser.add_argument("input_dir", help="Directory containing per-WSI .npz label maps.")
-    parser.add_argument(
+    grouping = parser.add_mutually_exclusive_group(required=True)
+    grouping.add_argument("--patient-manifest", help="CSV with source_file,patient_id columns; preferred over prefix grouping.")
+    grouping.add_argument(
         "--prefix-length",
         type=int,
-        required=True,
         help="Group files by the first N characters of the filename stem.",
     )
     parser.add_argument(
@@ -28,11 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="_merged",
         help="Suffix for merged output files. Default: _merged.",
     )
-    parser.add_argument(
-        "--keep-originals",
-        action="store_true",
-        help="Keep source .npz files instead of deleting merged originals.",
-    )
+    deletion = parser.add_mutually_exclusive_group()
+    deletion.add_argument("--delete-originals", action="store_true", help="Explicitly delete sources after verified atomic save. Sources are kept by default.")
+    deletion.add_argument("--keep-originals", action="store_true", help="Keep sources (the default; retained for compatibility).")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -49,7 +48,8 @@ def main(argv: list[str] | None = None) -> int:
         prefix_length=args.prefix_length,
         blank_cols=args.blank_cols,
         output_suffix=args.output_suffix,
-        delete_originals=not args.keep_originals,
+        delete_originals=args.delete_originals,
+        patient_manifest=args.patient_manifest,
         dry_run=args.dry_run,
         progress=not args.no_progress,
     )

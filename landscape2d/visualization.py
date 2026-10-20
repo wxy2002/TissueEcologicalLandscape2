@@ -16,9 +16,10 @@ def save_label_png(
     min_patch_cells: int = 0,
     connectivity: int = 4,
     max_grid_cells: int = 20_000,
+    region_ids: np.ndarray | None = None,
 ) -> Path:
     labels = validate_matrix(matrix)
-    labels = filter_small_patches(labels, min_patch_cells, connectivity)
+    labels = filter_small_patches(labels, min_patch_cells, connectivity, region_ids)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
